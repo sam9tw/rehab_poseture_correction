@@ -1,0 +1,52 @@
+# ── 影片資料集（體積過大，不上傳）──
+data/
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# ── 特徵快取 ──
+data/video_features_v1/
+*.npz
+
+# ── 模型權重 ──
+*.pt
+*.pth
+*.onnx
+
+# ── 評估輸出（可本地重跑）──
+test_eval_results/
+confusion_matrix_*/
+confusion_matrix_val/
+wrong_samples_*.csv
+
+# ── Python 快取 ──
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Jupyter 暫存 ──
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── 訓練 log ──
+dedup_log.txt
+
+# ── 虛擬環境 ──
+venv/
+.venv/
+env/
+
+# ── 作業系統 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Office 暫存鎖定檔 ──
+~$*
+
+# ── IDE ──
+.vscode/settings.json
+.idea/
