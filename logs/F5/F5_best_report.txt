@@ -1,0 +1,31 @@
+Fold 5  Best Epoch: 48
+Val macro-F1 : 85.8124%
+Val Acc      : 85.7860%
+
+=== Classification Report ===
+                            precision    recall  f1-score   support
+
+   shoulder_abduction_left      0.809     0.833     0.821        66
+  shoulder_abduction_right      0.788     0.776     0.782        67
+     shoulder_flexion_left      0.923     0.909     0.916        66
+    shoulder_flexion_right      0.897     0.910     0.904        67
+    shoulder_backward_left      0.844     0.806     0.824        67
+   shoulder_backward_right      0.838     0.851     0.844        67
+        elbow_flexion_left      0.814     0.864     0.838        66
+       elbow_flexion_right      0.862     0.848     0.855        66
+shoulder_forward_elevation      0.953     0.924     0.938        66
+
+                  accuracy                          0.858       598
+                 macro avg      0.859     0.858     0.858       598
+              weighted avg      0.859     0.858     0.858       598
+
+=== Confusion Matrix ===
+[[55  8  2  0  0  0  1  0  0]
+ [ 9 52  0  4  1  0  0  0  1]
+ [ 3  2 60  1  0  0  0  0  0]
+ [ 1  4  1 61  0  0  0  0  0]
+ [ 0  0  0  0 54  8  3  2  0]
+ [ 0  0  0  0  8 57  1  1  0]
+ [ 0  0  0  0  0  2 57  6  1]
+ [ 0  0  0  0  1  1  7 56  1]
+ [ 0  0  2  2  0  0  1  0 61]]

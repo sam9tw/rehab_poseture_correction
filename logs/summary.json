@@ -1,0 +1,39 @@
+{
+  "n_folds": 5,
+  "min_class_count": 391,
+  "split_ratio": "85pool/15test + 5-fold CV",
+  "folds": [
+    {
+      "fold": 1,
+      "best_val_macro_f1": 86.1363,
+      "best_val_acc": 86.1436,
+      "best_epoch": 41
+    },
+    {
+      "fold": 2,
+      "best_val_macro_f1": 84.3327,
+      "best_val_acc": 84.2809,
+      "best_epoch": 41
+    },
+    {
+      "fold": 3,
+      "best_val_macro_f1": 85.4513,
+      "best_val_acc": 85.4515,
+      "best_epoch": 57
+    },
+    {
+      "fold": 4,
+      "best_val_macro_f1": 86.3699,
+      "best_val_acc": 86.4548,
+      "best_epoch": 32
+    },
+    {
+      "fold": 5,
+      "best_val_macro_f1": 85.8124,
+      "best_val_acc": 85.786,
+      "best_epoch": 48
+    }
+  ],
+  "mean_val_macro_f1": 85.6205,
+  "mean_val_acc": 85.6234
+}

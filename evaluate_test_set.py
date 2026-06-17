@@ -422,7 +422,7 @@ class TestVideoDataset(Dataset):
 # =========================================================
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--weights", type=str, default="mbv3_s_tf_best.pt",
+    ap.add_argument("--weights", type=str, default="v1-F5.pt",
                     help="TinyTFClassifier 權重檔")
     ap.add_argument("--split_json", type=str, default="data_split.json",
                     help="訓練腳本產出的 data_split.json（內含 test 路徑清單）")
@@ -435,7 +435,7 @@ def main():
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--cache_root", type=str, default="data/video_features_v1",
                     help="特徵快取資料夾（與訓練同 hash key）")
-    ap.add_argument("--out_dir", type=str, default="test_eval_results",
+    ap.add_argument("--out_dir", type=str, default="logs/test_eval_results",
                     help="評估結果輸出資料夾")
     ap.add_argument("--device", type=str, default="auto",
                     choices=["auto", "cpu", "cuda"])

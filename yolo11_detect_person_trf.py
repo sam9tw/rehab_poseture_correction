@@ -16,7 +16,7 @@ import torchvision.transforms as transforms
 from torchvision.models import mobilenet_v3_small, MobileNet_V3_Small_Weights
 from torchvision.ops import roi_align
 from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
 from tqdm import tqdm
 
@@ -503,71 +503,44 @@ for label_idx in range(len(LABELS)):
 print(f"平衡後總樣本: {len(balanced_samples)}  ({len(LABELS)} 類 x {min_count})\n")
 
 # ===================================================================
-# 7. 分割 train / val / test（70 / 15 / 15，stratified by class）
+# 7. 分割 pool / test（85% pool，15% test 封存）
 # ===================================================================
 _paths  = [p for p, _ in balanced_samples]
 _labels = [l for _, l in balanced_samples]
 
-# 第一刀：70% train，30% temp
-train_paths, temp_paths, train_labels, temp_labels = train_test_split(
-    _paths, _labels, test_size=0.30, stratify=_labels, random_state=42
-)
-# 第二刀：temp 各半 -> 15% val，15% test
-val_paths, test_paths, val_labels, test_labels = train_test_split(
-    temp_paths, temp_labels, test_size=0.50, stratify=temp_labels, random_state=42
+# 85% 進入 5-fold CV pool，15% 封存為 test
+pool_paths, test_paths, pool_labels, test_labels = train_test_split(
+    _paths, _labels, test_size=0.15, stratify=_labels, random_state=42
 )
 
 _total = len(balanced_samples)
 print("[2/3] 資料分割結果：")
-print(f"  Train : {len(train_paths):4d} samples  ({len(train_paths)/_total*100:.0f}%)")
-print(f"  Val   : {len(val_paths):4d} samples  ({len(val_paths)/_total*100:.0f}%)")
-print(f"  Test  : {len(test_paths):4d} samples  ({len(test_paths)/_total*100:.0f}%)")
+print(f"  Pool (train+val): {len(pool_paths):4d} samples  ({len(pool_paths)/_total*100:.0f}%)")
+print(f"  Test  (封存)    : {len(test_paths):4d} samples  ({len(test_paths)/_total*100:.0f}%)")
 
-# 儲存 split 路徑供評估腳本使用
+# 儲存 split 供評估腳本使用
 split_info = {
     "min_class_count": min_count,
-    "split_ratio": "70/15/15",
-    "train": train_paths,
-    "val":   val_paths,
-    "test":  test_paths,
+    "split_ratio": "85pool/15test + 5-fold CV",
+    "pool": pool_paths,
+    "test": test_paths,
 }
 with open("data_split.json", "w", encoding="utf-8") as _f:
     json.dump(split_info, _f, ensure_ascii=False, indent=2)
 print("  Split 資訊已儲存至 data_split.json\n")
 
 # ===================================================================
-# 8. 建立 Dataset（直接傳入路徑清單，不再掃描目錄）
+# 8. 準備 5-fold StratifiedKFold
 # ===================================================================
-train_dataset = VideoDataset(
-    root_dir='data',
-    transform_norm=transform_norm,
-    yolo_model=yolo,
-    feature_extractor=feature_extractor,
-    max_frames=30,
-    yolo_device=yolo_device,
-    show=False,
-    is_train=True,
-    flip_prob=0.5,
-    file_list=list(zip(train_paths, train_labels)),
-)
-val_dataset = VideoDataset(
-    root_dir='data',
-    transform_norm=transform_norm,
-    yolo_model=yolo,
-    feature_extractor=feature_extractor,
-    max_frames=30,
-    yolo_device=yolo_device,
-    show=False,
-    is_train=False,
-    flip_prob=0.0,
-    file_list=list(zip(val_paths, val_labels)),
-)
+pool_paths_arr  = np.array(pool_paths)
+pool_labels_arr = np.array(pool_labels)
+
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
 # ===================================================================
 # 9. 訓練主函式（macro-F1 early stopping）
 # ===================================================================
-def run_training(train_ds, val_ds):
-    # 類別已平衡，直接 shuffle 即可，不需要 WeightedRandomSampler
+def run_training(train_ds, val_ds, fold_num):
     train_loader = DataLoader(train_ds, batch_size=8, shuffle=True,  num_workers=0)
     val_loader   = DataLoader(val_ds,   batch_size=8, shuffle=False, num_workers=0)
 
@@ -581,17 +554,31 @@ def run_training(train_ds, val_ds):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
-    best_val_f1  = 0.0
-    best_val_acc = 0.0
-    patience     = 10
+    best_val_f1   = 0.0
+    best_val_acc  = 0.0
+    best_epoch    = 0
+    best_cr_text  = ""
+    best_cm       = None
+    patience      = 10
     patience_counter = 0
 
-    csv_path = "wrong_samples_train.csv"
-    with open(csv_path, "w", newline="") as _f:
+    # ---- Log 初始化 ----
+    log_dir = os.path.join("logs", f"F{fold_num}")
+    os.makedirs(log_dir, exist_ok=True)
+
+    epoch_csv_path = os.path.join(log_dir, f"F{fold_num}_epochs.csv")
+    wrong_csv_path = os.path.join(log_dir, f"F{fold_num}_wrong_samples.csv")
+
+    with open(epoch_csv_path, "w", newline="", encoding="utf-8") as _f:
+        csv.writer(_f).writerow([
+            "fold", "epoch", "train_loss", "val_loss",
+            "train_acc", "val_acc", "val_macro_f1", "lr", "is_best"
+        ])
+    with open(wrong_csv_path, "w", newline="", encoding="utf-8") as _f:
         csv.writer(_f).writerow(["Epoch", "Filename", "True Label", "Predicted Label"])
 
     EPOCHS = 128
-    for epoch in tqdm(range(EPOCHS), desc="Epochs"):
+    for epoch in tqdm(range(EPOCHS), desc=f"[Fold {fold_num}] Epochs"):
 
         # ---- Train ----
         model.train()
@@ -657,32 +644,66 @@ def run_training(train_ds, val_ds):
         val_acc      = correct / total * 100 if total > 0 else 0.0
         val_macro_f1 = f1_score(y_true_all, y_pred_all,
                                 average='macro', zero_division=0) * 100
+        cur_lr       = optimizer.param_groups[0]['lr']
 
+        # ---- 寫錯誤樣本 ----
         if wrong_samples_ep:
-            with open(csv_path, "a", newline="") as _f:
+            with open(wrong_csv_path, "a", newline="", encoding="utf-8") as _f:
                 csv.writer(_f).writerows(wrong_samples_ep)
             print(f"  wrong_label_cnt: {wrong_label_cnt}")
             print(f"  label_cnt:       {label_cnt}")
 
-        prev_lr = optimizer.param_groups[0]['lr']
+        # ---- LR Scheduler ----
+        prev_lr = cur_lr
         scheduler.step(val_macro_f1)
         new_lr = optimizer.param_groups[0]['lr']
         if new_lr < prev_lr:
             print(f"  LR: {prev_lr:.2e} -> {new_lr:.2e}")
 
+        # ---- Early stopping 判斷 ----
+        is_best = val_macro_f1 > best_val_f1
+        if is_best:
+            best_val_f1  = val_macro_f1
+            best_val_acc = val_acc
+            best_epoch   = epoch + 1
+            patience_counter = 0
+            torch.save(model.state_dict(), f"v1-F{fold_num}.pt")
+            # 儲存最佳 epoch 的分類報告與混淆矩陣（供事後查閱）
+            best_cr_text = classification_report(
+                y_true_all, y_pred_all,
+                labels=list(range(len(LABELS))), target_names=LABELS,
+                digits=3, zero_division=0
+            )
+            best_cm = confusion_matrix(y_true_all, y_pred_all,
+                                       labels=list(range(len(LABELS))))
+        else:
+            patience_counter += 1
+
+        # ---- 寫 epoch CSV ----
+        with open(epoch_csv_path, "a", newline="", encoding="utf-8") as _f:
+            csv.writer(_f).writerow([
+                fold_num, epoch + 1,
+                round(total_loss, 6), round(val_loss, 6),
+                round(train_acc, 4),  round(val_acc, 4),
+                round(val_macro_f1, 4), round(cur_lr, 8),
+                int(is_best)
+            ])
+
+        # ---- Console ----
         print(
-            f"Ep {epoch+1:03d} | "
+            f"[F{fold_num}] Ep {epoch+1:03d} | "
             f"TrainLoss={total_loss:.4f} ValLoss={val_loss:.4f} | "
             f"TrainAcc={train_acc:.2f}% ValAcc={val_acc:.2f}% "
             f"Val-macroF1={val_macro_f1:.2f}%"
+            + (" ★ best" if is_best else "")
         )
 
         cm = confusion_matrix(y_true_all, y_pred_all, labels=list(range(len(LABELS))))
         print(f"  Confusion Matrix:\n{cm}")
 
-        os.makedirs("confusion_matrix_val", exist_ok=True)
+        os.makedirs(f"confusion_matrix_F{fold_num}", exist_ok=True)
         np.savetxt(
-            f"confusion_matrix_val/cm_epoch{epoch+1:03d}.csv",
+            f"confusion_matrix_F{fold_num}/cm_epoch{epoch+1:03d}.csv",
             cm.astype(int), delimiter=",", fmt="%d"
         )
 
@@ -702,31 +723,104 @@ def run_training(train_ds, val_ds):
             else:
                 print(f"    {i:02d} {name:30s}: N=0")
 
-        if val_macro_f1 > best_val_f1:
-            best_val_f1  = val_macro_f1
-            best_val_acc = val_acc
-            patience_counter = 0
-            torch.save(model.state_dict(), "mbv3_s_tf_best.pt")
-            print(f"  -> new best  macro-F1={best_val_f1:.2f}%  acc={best_val_acc:.2f}%  (saved)")
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"  Early stopping (patience={patience})")
-                break
+        if is_best:
+            print(f"  -> new best  macro-F1={best_val_f1:.2f}%  acc={best_val_acc:.2f}%  (saved v1-F{fold_num}.pt)")
+        elif patience_counter >= patience:
+            print(f"  Early stopping (patience={patience})")
+            break
 
-    return best_val_f1, best_val_acc
+    # ---- 儲存此折最佳 epoch 的詳細報告 ----
+    if best_cr_text:
+        report_path = os.path.join(log_dir, f"F{fold_num}_best_report.txt")
+        with open(report_path, "w", encoding="utf-8") as _f:
+            _f.write(f"Fold {fold_num}  Best Epoch: {best_epoch}\n")
+            _f.write(f"Val macro-F1 : {best_val_f1:.4f}%\n")
+            _f.write(f"Val Acc      : {best_val_acc:.4f}%\n\n")
+            _f.write("=== Classification Report ===\n")
+            _f.write(best_cr_text)
+            if best_cm is not None:
+                _f.write("\n=== Confusion Matrix ===\n")
+                _f.write(str(best_cm) + "\n")
+
+    return best_val_f1, best_val_acc, best_epoch 
 
 # ===================================================================
-# 10. 執行訓練
+# 10. 執行 5-fold 訓練
 # ===================================================================
-print("[3/3] 開始訓練...\n")
-best_f1, best_acc = run_training(train_dataset, val_dataset)
+print("[3/3] 開始 5-fold 交叉驗證訓練...\n")
+fold_results = []  # list of (fold_num, best_f1, best_acc)
 
+for fold_num, (train_idx, val_idx) in enumerate(
+    skf.split(pool_paths_arr, pool_labels_arr), start=1
+):
+    print(f"\n{'='*60}")
+    print(f"Fold {fold_num}/5  train={len(train_idx)} samples  val={len(val_idx)} samples")
+    print('='*60)
+
+    train_paths_fold  = pool_paths_arr[train_idx].tolist()
+    train_labels_fold = pool_labels_arr[train_idx].tolist()
+    val_paths_fold    = pool_paths_arr[val_idx].tolist()
+    val_labels_fold   = pool_labels_arr[val_idx].tolist()
+
+    train_dataset = VideoDataset(
+        root_dir='data',
+        transform_norm=transform_norm,
+        yolo_model=yolo,
+        feature_extractor=feature_extractor,
+        max_frames=30,
+        yolo_device=yolo_device,
+        show=False,
+        is_train=True,
+        flip_prob=0.5,
+        file_list=list(zip(train_paths_fold, train_labels_fold)),
+    )
+    val_dataset = VideoDataset(
+        root_dir='data',
+        transform_norm=transform_norm,
+        yolo_model=yolo,
+        feature_extractor=feature_extractor,
+        max_frames=30,
+        yolo_device=yolo_device,
+        show=False,
+        is_train=False,
+        flip_prob=0.0,
+        file_list=list(zip(val_paths_fold, val_labels_fold)),
+    )
+
+    best_f1, best_acc, best_ep = run_training(train_dataset, val_dataset, fold_num)
+    fold_results.append((fold_num, best_f1, best_acc, best_ep))
+    print(f"[Fold {fold_num}]  best macro-F1={best_f1:.2f}%  best acc={best_acc:.2f}%  best_epoch={best_ep}")
+
+# === 最終摘要 ===
 print("\n" + "="*60)
-print("訓練完成")
+print("5-fold CV 訓練完成")
 print("="*60)
-print(f"  Best Val macro-F1 = {best_f1:.2f}%")
-print(f"  Best Val Acc      = {best_acc:.2f}%")
-print(f"  模型已儲存至      : mbv3_s_tf_best.pt")
-print(f"  分割資訊已儲存至  : data_split.json")
+for fid, f1, acc, bep in fold_results:
+    print(f"  Fold {fid}:  macro-F1={f1:.2f}%  acc={acc:.2f}%  best_epoch={bep}")
+if fold_results:
+    mean_f1  = float(np.mean([r[1] for r in fold_results]))
+    mean_acc = float(np.mean([r[2] for r in fold_results]))
+    print(f"  ---- Mean macro-F1 = {mean_f1:.2f}% ----")
+    print(f"  ---- Mean Acc      = {mean_acc:.2f}% ----")
+print(f"\n  模型已分別儲存至: v1-F1.pt ~ v1-F5.pt")
+print(f"  Log 已儲存至: logs/F1/ ~ logs/F5/")
+print(f"  Test set 分割資訊: data_split.json")
+
+# 寫整體摘要 JSON
+os.makedirs("logs", exist_ok=True)
+summary = {
+    "n_folds": 5,
+    "min_class_count": min_count,
+    "split_ratio": "85pool/15test + 5-fold CV",
+    "folds": [
+        {"fold": fid, "best_val_macro_f1": round(f1, 4),
+         "best_val_acc": round(acc, 4), "best_epoch": bep}
+        for fid, f1, acc, bep in fold_results
+    ],
+    "mean_val_macro_f1": round(float(np.mean([r[1] for r in fold_results])), 4) if fold_results else 0,
+    "mean_val_acc":      round(float(np.mean([r[2] for r in fold_results])), 4) if fold_results else 0,
+}
+with open(os.path.join("logs", "summary.json"), "w", encoding="utf-8") as _f:
+    json.dump(summary, _f, ensure_ascii=False, indent=2)
+print(f"\n  整體訓練摘要已儲存至: logs/summary.json")
 print(f"\n[提示] 執行 evaluate_test_set.py 對 test set 做最終評估。")
